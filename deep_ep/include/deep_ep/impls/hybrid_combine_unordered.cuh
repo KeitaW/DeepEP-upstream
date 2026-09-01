@@ -56,7 +56,8 @@ hybrid_unordered_combine_impl(nv_bfloat16* x,
                     const ncclDevComm_t nccl_dev_comm, const ncclWindow_t nccl_window,
                     void* buffer, void* workspace,
                     const int scaleout_rank_idx, const int scaleup_rank_idx,
-                    int num_reduced_tokens, const int num_combined_tokens) {
+                    int num_reduced_tokens, const int num_combined_tokens,
+                    const uint32_t combine_iteration) {
     // Utils
     const auto sm_idx = static_cast<int>(blockIdx.x);
     const auto thread_idx = static_cast<int>(threadIdx.x);
@@ -749,19 +750,21 @@ hybrid_unordered_combine_impl(nv_bfloat16* x,
         // one lane polls. We poll with a timeout (instead of the blocking
         // `waitSignalMeetShadow`) so a stuck peer surfaces a diagnostic rather than
         // hanging.
-        if (ptx::elect_one_sync()) {
-            const auto shadow_ptr = gin.gin.getSignalShadowPtr(signal_id);
-            const auto target = (*shadow_ptr += static_cast<uint64_t>(num_expected_arrivals));
+        (void) num_expected_arrivals;
+        // putValue gate: one lane polls one sender's iteration flag. Wrap-safe
+        // comparison holds across uint32 overflow.
+        if (lane_idx < kNumScaleoutRanks and lane_idx != scaleout_rank_idx) {
+            const auto flag_ptr = workspace_layout.get_combine_gate_flag_ptr(channel_idx, lane_idx);
             comm::timeout_while<kNumTimeoutCycles>([=](const bool& is_last_check) {
-                const auto signal = gin.gin.readSignal(signal_id, 64, cuda::memory_order_acquire);
-                if (signal >= target)
+                const auto flag = ptx::ld_acquire_sys(flag_ptr);
+                if (static_cast<int32_t>(flag - combine_iteration) >= 0)
                     return true;
 
                 if (is_last_check) {
-                    printf("DeepEP combine (scale-out wait all) timeout, scale-out: %d/%d, scale-up: %d/%d, "
-                           "channel: %d, signal: %lu, target: %lu\n",
+                    printf("DeepEP combine (putValue gate) timeout, scale-out: %d/%d, scale-up: %d/%d, "
+                           "channel: %d, sender: %d, flag: %u, iteration: %u\n",
                            scaleout_rank_idx, kNumScaleoutRanks, scaleup_rank_idx, kNumScaleupRanks,
-                           channel_idx, signal, target);
+                           channel_idx, lane_idx, flag, combine_iteration);
                 }
                 return false;
             });
@@ -823,6 +826,15 @@ hybrid_unordered_combine_impl(nv_bfloat16* x,
                                 tail[forward_warp_idx] == ptx::ld_acquire_cta(proxy_ring_layout.get_head(forward_warp_idx))) {
                                 ring_done[forward_warp_idx] = true;
                                 ++ num_forward_warps_done_cnt;
+                                {
+                                    const auto flag_channel_idx = sm_idx * kNumChannelsPerSM + forward_warp_idx;
+                                    const auto flag_ptr = workspace_layout.get_combine_gate_flag_ptr(
+                                        flag_channel_idx, scaleout_rank_idx);
+                                    for (int dst_rank_idx = 0; dst_rank_idx < kNumScaleoutRanks; ++ dst_rank_idx)
+                                        if (dst_rank_idx != scaleout_rank_idx)
+                                            gin_ctx[forward_warp_idx].put_value<ncclTeamTagRail>(
+                                                flag_ptr, combine_iteration, dst_rank_idx);
+                                }
                             }
                             continue;
                         }
@@ -833,8 +845,7 @@ hybrid_unordered_combine_impl(nv_bfloat16* x,
                             desc.recv_ptr, desc.send_ptr,
                             desc.num_bytes,
                             desc.dst,
-                            0, /*flags=0*/
-                            ncclGin_SignalAdd{ring_signal_id[forward_warp_idx], static_cast<uint64_t>(1)}
+                            0 /*flags=0*/
                         );
 
                         ++ tail[forward_warp_idx];
@@ -878,12 +889,20 @@ hybrid_unordered_combine_impl(nv_bfloat16* x,
                         desc.recv_ptr, desc.send_ptr,
                         desc.num_bytes,
                         desc.dst,
-                        0, /*flags=0*/
-                        ncclGin_SignalAdd{signal_id, static_cast<uint64_t>(1)}
+                        0 /*flags=0*/
                     );
 
                     ptx::st_release_cta(proxy_ring_layout.get_tail(lane_idx), tail + 1);
                     ++ tail;
+                }
+
+                {
+                    const auto flag_ptr = workspace_layout.get_combine_gate_flag_ptr(
+                        channel_idx, scaleout_rank_idx);
+                    for (int dst_rank_idx = 0; dst_rank_idx < kNumScaleoutRanks; ++ dst_rank_idx)
+                        if (dst_rank_idx != scaleout_rank_idx)
+                            gin.put_value<ncclTeamTagRail>(
+                                flag_ptr, combine_iteration, dst_rank_idx);
                 }
             }
         }

@@ -56,6 +56,7 @@ public:
         int scaleout_rank_idx, scaleup_rank_idx;
         int num_reduced_tokens;
         int num_combined_tokens;
+        uint32_t combine_iteration;
 
         jit::LaunchArgs launch_args;
     };
@@ -133,7 +134,8 @@ static void __instantiate_kernel() {{
                                                      args.buffer, args.workspace,
                                                      args.scaleout_rank_idx, args.scaleup_rank_idx,
                                                      args.num_reduced_tokens,
-                                                     args.num_combined_tokens));
+                                                     args.num_combined_tokens,
+                                                     args.combine_iteration));
         }
     }
 };
@@ -153,6 +155,7 @@ static void* launch_combine(void* x,
                             const jit::NoRefPtr& nccl_dev_comm, const ncclWindow_t& nccl_window,
                             void* buffer, void* workspace,
                             const int& num_reduced_tokens, const int& num_combined_tokens,
+                            const uint32_t& combine_iteration,
                             const int& num_max_tokens_per_rank,
                             const int& hidden,
                             const int& num_experts, const int& num_topk,
@@ -228,6 +231,7 @@ static void* launch_combine(void* x,
         .scaleout_rank_idx = scaleout_rank_idx, .scaleup_rank_idx = scaleup_rank_idx,
         .num_reduced_tokens = num_reduced_tokens,
         .num_combined_tokens = num_combined_tokens,
+        .combine_iteration = combine_iteration,
         // NOTES: make cluster dim 2 to overlap with clustered computation kernels
         .launch_args = jit::LaunchArgs(num_sms, num_threads, num_smem_bytes, 2 - (num_sms % 2), true)
     };
