@@ -36,6 +36,11 @@ static constexpr int kHybridDispatchTag1 = 7;
 static constexpr int kHybridCombineTag0 = 8;
 static constexpr int kHybridCombineTag1 = 9;
 
+// The rail barrier indexes its flag slots by tag, so a new tag must stay inside the
+// table sized in `WorkspaceLayout`. Raise `kNumBarrierTags` when adding one.
+static_assert(kHybridCombineTag1 < layout::WorkspaceLayout::kNumBarrierTags,
+              "barrier tag exceeds the rail barrier flag table; raise kNumBarrierTags");
+
 // Some reserved count
 static constexpr int kFlushAllAllocatedQPs = -1;
 
