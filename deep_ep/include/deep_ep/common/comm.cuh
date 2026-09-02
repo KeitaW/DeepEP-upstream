@@ -224,6 +224,13 @@ __forceinline__ __device__ void gin_barrier_wo_local_sync(
         //
         // Counters are local: `send_seq` and `recv_seq` mirror the signal shadow the world
         // branch below uses, so the round number needs no plumbing from the host.
+        // Post the flag on QP 0 with CTA-scoped sharing, the context the signal protocol
+        // below uses. The caller's handle belongs to its channel and, once the SM count
+        // exceeds the QP count, is shared grid-wide, so publishing arrival through it puts
+        // the barrier behind whatever the data path is driving on that context.
+        const handle::NCCLGin barrier_gin(
+            gin_handle.nccl_dev_comm, gin_handle.nccl_window, 0, NCCL_GIN_RESOURCE_SHARING_CTA);
+
         for (int i = thread_idx; i < kNumRanks; i += kNumThreads) {
             if (i == rank_idx) continue;
             const auto slot_idx = (rank_idx < i) ? rank_idx : (rank_idx - 1);
@@ -231,7 +238,7 @@ __forceinline__ __device__ void gin_barrier_wo_local_sync(
             const auto round = ++(*seq_ptr);
             const auto flag_ptr = workspace.get_rail_barrier_flag_ptr(
                 kTag, static_cast<int>(round & 1), slot_idx);
-            gin_handle.put_value<ncclTeamTagRail>(flag_ptr, round, i);
+            barrier_gin.put_value<ncclTeamTagRail>(flag_ptr, round, i);
         }
 
         for (int i = thread_idx; i < kNumRanks - 1; i += kNumThreads) {
