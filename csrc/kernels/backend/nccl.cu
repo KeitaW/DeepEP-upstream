@@ -137,9 +137,10 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
             gin_config.gin_indexed_signals_cnt = 0;
         }
 
-        EP_HOST_ASSERT(gin_config.gin_indexed_signals_cnt >= (num_rdma_ranks - 1) and
-                       "GIN indexed-signal budget cannot give each peer rail team a dedicated "
-                       "signal; reduce num_allocated_qps to raise the per-context signal count");
+        // NOTES: the rail barrier used to need one indexed signal per peer, which capped
+        // scale-out at 22 NVLink domains. It now synchronizes through `putValue` iteration
+        // flags in the workspace and consumes no indexed signals, so the whole per-context
+        // budget belongs to the data path and the team size no longer bounds it.
 
         this->num_allocated_qps = gin_config.gin_context_cnt;
 
