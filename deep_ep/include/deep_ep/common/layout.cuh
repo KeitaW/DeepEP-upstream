@@ -36,9 +36,13 @@ struct WorkspaceLayout {
     static constexpr int64_t kNumBarrierSignalBytes = 16;
 
     // Rail barrier flag storage. One slot per (tag, phase, peer). Tags come from the
-    // `k*Tag*` constants in `comm.cuh`; phases alternate so that only one write per slot
-    // is ever in flight (see the ordering argument at the rail branch of
-    // `gin_barrier_wo_local_sync`).
+    // `k*Tag*` constants in `comm.cuh` and every instantiation of the rail barrier checks
+    // its tag against this bound; phases alternate so that only one write per slot is
+    // ever in flight (see the ordering argument at the rail branch of
+    // `gin_barrier_wo_local_sync`). The flags and the round counters behind them are
+    // monotonic for the life of the buffer: they are zeroed once at construction and must
+    // never be reset, because a rank whose counters restart while its peers' flags do not
+    // either passes a barrier without waiting or waits forever.
     static constexpr int kNumBarrierTags = 16;
     static constexpr int kNumBarrierPhases = 2;
 

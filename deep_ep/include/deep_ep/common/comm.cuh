@@ -36,11 +36,6 @@ static constexpr int kHybridDispatchTag1 = 7;
 static constexpr int kHybridCombineTag0 = 8;
 static constexpr int kHybridCombineTag1 = 9;
 
-// The rail barrier indexes its flag slots by tag, so a new tag must stay inside the
-// table sized in `WorkspaceLayout`. Raise `kNumBarrierTags` when adding one.
-static_assert(kHybridCombineTag1 < layout::WorkspaceLayout::kNumBarrierTags,
-              "barrier tag exceeds the rail barrier flag table; raise kNumBarrierTags");
-
 // Some reserved count
 static constexpr int kFlushAllAllocatedQPs = -1;
 
@@ -224,6 +219,19 @@ __forceinline__ __device__ void gin_barrier_wo_local_sync(
         //
         // Counters are local: `send_seq` and `recv_seq` mirror the signal shadow the world
         // branch below uses, so the round number needs no plumbing from the host.
+        //
+        // The phase argument holds only under three call-site requirements, none of which
+        // this function can check at runtime:
+        //   1. every rank runs the same number of rail barriers per tag, so the counters on
+        //      both sides stay in lockstep;
+        //   2. two rail barriers on the same tag are separated by a rank-wide join (a grid
+        //      sync or a kernel boundary), so no thread posts round k+1 while another thread
+        //      of the same rank still waits on round k;
+        //   3. the workspace is never re-zeroed after construction (see `buffer.hpp`).
+        // Breaking any of them strands a waiter without a crash.
+        static_assert(kTag >= 0 and kTag < layout::WorkspaceLayout::kNumBarrierTags,
+                      "barrier tag exceeds the rail barrier flag table; raise kNumBarrierTags");
+
         // Post the flag on QP 0 with CTA-scoped sharing, the context the signal protocol
         // below uses. The caller's handle belongs to its channel and, once the SM count
         // exceeds the QP count, is shared grid-wide, so publishing arrival through it puts
@@ -247,20 +255,26 @@ __forceinline__ __device__ void gin_barrier_wo_local_sync(
             const auto flag_ptr = workspace.get_rail_barrier_flag_ptr(
                 kTag, static_cast<int>(round & 1), i);
 
+            // Under the lockstep above the slot holds exactly `round` once the arrival
+            // lands, so an exact compare is sufficient and it turns a broken requirement
+            // into a timeout at the round where it broke, with the stale value printed.
             timeout_while<kNumTimeoutCycles>([=](const bool& is_last_check) {
                 const auto flag = ptx::ld_acquire_sys(flag_ptr);
-                if (static_cast<int32_t>(flag - round) >= 0)
+                if (flag == round)
                     return true;
 
                 if (is_last_check) {
+                    const auto peer_idx = (i < rank_idx) ? i : (i + 1);
                     printf("DeepEP rail barrier timeout, tag: %d, scaleout: %d, scaleup: %d, thread: %d, "
-                           "slot: %d, flag: %u, round: %u\n",
-                           kTag, scaleout_rank_idx, scaleup_rank_idx, thread_idx, i, flag, round);
+                           "peer: %d, flag: %u, round: %u\n",
+                           kTag, scaleout_rank_idx, scaleup_rank_idx, thread_idx, peer_idx, flag, round);
                 }
                 return false;
             });
         }
     } else {
+        static_assert(std::is_same_v<team_t, ncclTeamTagWorld>, "only the world and rail teams have a GIN barrier");
+
         // Use QP 0 to do barrier
         const auto team = ncclTeamWorld(nccl_dev_comm);
         const ncclGin gin(nccl_dev_comm, 0, NCCL_GIN_RESOURCE_SHARING_CTA);
