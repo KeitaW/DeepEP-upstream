@@ -108,6 +108,12 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
 
         const bool scaleout_active = num_rdma_ranks > 1;
 
+        // Both hybrid kernel variants carry `EP_STATIC_ASSERT(kNumScaleoutRanks <= 32)`
+        // (`hybrid_dispatch.cuh`, `hybrid_dispatch_unordered.cuh`, `hybrid_combine_unordered.cuh`),
+        // which would otherwise only surface at JIT compilation. Reject the topology here.
+        EP_HOST_ASSERT((not allow_hybrid_mode or num_rdma_ranks <= 32) and
+                       "the hybrid kernels support at most 32 scale-out ranks (NVLink domains)");
+
         // Only the unordered hybrid kernels use the shared-context weak-signal GIN
         // configuration; direct mode and the ordered hybrid kernels keep the
         // upstream requirements untouched.
